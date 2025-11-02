@@ -49,24 +49,21 @@ def connect_CRB(port):
 
 #CLASSE PRINCIPAL DO ROBÔ
 class Corobeu:
-    def __init__(self, kp, ki, kd, dt, omega_max):
+    def __init__(self, kp, ki, kd, dt):
         
         self.kp = kp
         self.ki = ki
         self.kd = kd
         self.dt = dt
         
-        # --- Limites de Saída (para anti-windup e segurança) ---
-        self.omega_min = -omega_max
-        self.omega_max = omega_max
-        
         # --- Filtro para o Termo Derivativo ---
         self.filter_alpha = 0.5 
         
         # --- Variáveis de Estado do PID (precisam ser lembradas entre as chamadas) ---
-        self.integral = 0.0
-        self.previous_error = 0.0
-        self.filtered_previous_error = 0.0
+        self.integral_range = 30
+        self.interror = [0 for _ in range(self.integral_range)]
+        self.Integral_part = 0
+        self.f_ant = 0
         
         # --- Parâmetros Físicos e de Movimento do Robô ---
         self.v_max = 8
@@ -115,35 +112,28 @@ class Corobeu:
         
         return int(vl), int(vr)
 
-    def pid_controller(self, error):
+    def pid_controller(self, error, integral_counter):
         """
         Controlador PID robusto com filtro na derivada e anti-windup na integral.
         """
-        # --- 1. Termo Proporcional (P) ---
-        proportional_term = self.kp * error
-        
-        # --- 2. Termo Derivativo (D) com Filtro ---
-        filtered_error = (self.filter_alpha * error) + (1 - self.filter_alpha) * self.filtered_previous_error
-        derivative_term = self.kd * (filtered_error - self.filtered_previous_error) / self.dt
-        
-        # --- 3. Termo Integral (I) com Anti-Windup Condicional ---
-        potential_integral = self.integral + error * self.dt
-        provisional_omega = proportional_term + self.ki * potential_integral + derivative_term
-        
-        if self.omega_min < provisional_omega < self.omega_max:
-            self.integral = potential_integral
-            
-        integral_term = self.ki * self.integral
-        
-        # --- 4. Soma Final e Saturação da Saída ---
-        omega = proportional_term + integral_term + derivative_term
-        omega = max(min(omega, self.omega_max), self.omega_min)
-        
-        # --- 5. Atualização das Variáveis de Estado para a Próxima Iteração ---
-        self.previous_error = error
-        self.filtered_previous_error = filtered_error
-        
-        return omega
+        Integral_saturation = 5
+        raizes = math.sqrt(kd), math.sqrt(kp), math.sqrt(ki)
+        Filter_e = 1 / (max(raizes) * 10)
+        unomenosalfaana = math.exp(-(self.dt / Filter_e))
+        alfaana = 1 - unomenosalfaana
+        self.interror[integral_counter] = error
+        f = unomenosalfaana * self.f_ant + alfaana * error
+        deerror = (f - self.f_ant) / self.dt if self.f_ant != 0 else f / self.dt
+        self.Integral_part = min(
+            max(
+                self.Integral_part + ki * sum(self.interror) * self.dt,
+                -Integral_saturation,
+            ),
+            Integral_saturation,
+        )
+        self.f_ant = f
+        PID = kp * error + self.Integral_part + deerror * kd
+        return PID
     
     # --- MÉTODOS EXISTENTES E NOVOS PARA A ESTRATÉGIA ---
     
@@ -255,6 +245,7 @@ class Corobeu:
         (clientID, robot, motorE, motorD, ball) = connect_CRB(19995)
         
         print("Estratégia iniciada. Pressione Ctrl+C para parar.")
+        integral_counter = 0
         
         # Loop principal de estratégia
         while True:
@@ -263,7 +254,7 @@ class Corobeu:
                 continue # Garante que o loop rode na frequência definida por dt
             self.last_update_time = current_time
 
-            # 1. ATUALIZAR DADOS DO MUNDO
+            # 1. ATUALIZAR DADOS DO MUNDOintegral_counter
             s, robotPos = sim.simxGetObjectPosition(clientID, robot, -1, sim.simx_opmode_streaming)
             s, ballPos = sim.simxGetObjectPosition(clientID, ball, -1, sim.simx_opmode_streaming)
             s, robotOri = sim.simxGetObjectOrientation(clientID, robot, -1, sim.simx_opmode_blocking)
@@ -307,9 +298,13 @@ class Corobeu:
                 phid = math.atan2(self.ball_position['y'] - self.robot_position['y'], 
                                   self.ball_position['x'] - self.robot_position['x'])
                 error_phi = self.wrap_angle(phid - self.robot_position['phi'])
-                omega = self.pid_controller(error_phi)
+                omega = self.pid_controller(error_phi, integral_counter)
                 vl, vr = self.speed_control(self.v_linear, omega)
-            
+                
+                integral_counter += 1
+                if integral_counter >= self.integral_range:
+                    integral_counter = 0
+                
             elif self.current_state == STATE_AVOIDING_WALL:
                 print(f"ESTADO: [EVITANDO PAREDE]")
                 vl, vr = self.perform_wall_avoidance()
@@ -335,8 +330,7 @@ if __name__ == "__main__":
     kd = 0.06288346
     
     dt = 0.05  # Tempo de ciclo do controlador (50 ms)
-    omega_max = 8 # Velocidade angular máxima (rad/s)
     
     # --- Inicialização e Execução ---
-    crb01 = Corobeu(kp, ki, kd, dt, omega_max)
+    crb01 = Corobeu(kp, ki, kd, dt)
     crb01.run_strategy()

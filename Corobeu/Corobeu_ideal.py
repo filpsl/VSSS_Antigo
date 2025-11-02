@@ -170,6 +170,9 @@ class Corobeu:
                 if error_distance <= 0.07 and stop_on_arrival:
                     self.send_speed(0, 0)
                     self.off()
+                integral_counter += 1
+                if integral_counter >= self.integral_range:
+                    integral_counter = 0
 
     def pid_controller(self, error, integral_counter):
         Integral_saturation = 5
