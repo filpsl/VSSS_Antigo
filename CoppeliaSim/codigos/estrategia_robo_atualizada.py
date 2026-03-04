@@ -13,7 +13,13 @@ FIELD_Y_MAX = 0.65
 FIELD_Y_MIN = -0.65
 
 # Parâmetros da Estratégia
-WALL_MARGIN = 0.018 # Margem para evitar paredes preventivamente
+WALL_MARGIN = 0.03 # Margem para evitar paredes preventivamente
+GOAL_X = -0.75 # Posição do gol adversário
+GOAL_Y = 0.0 # Posição do gol adversário
+POSITIONING_DISTANCE = 0.09 # Distância para posicionamento antes do chute
+KICK_ALIGNMENT_DISTANCE = 0.05 # Quão perto do "ponto-alvo" o robô precisa estar
+KICK_ALIGNMENT_ANGLE = math.radians(35) # Tolerância de ângulo (em radianos) para o chute
+LOST_BALL_DISTANCE = 0.15 # Se a bola estiver a mais de 15cm, perdemos
 
 # --- NOVO: Parâmetros para detecção de robô preso e fuga ---
 STUCK_VELOCITY_THRESHOLD = 0.01 # Velocidade (m/s) abaixo da qual o robô é considerado parado
@@ -21,9 +27,10 @@ STUCK_PWM_THRESHOLD = 3.0       # Velocidade mínima enviada aos motores para co
 UNSTICK_DURATION = 1.0          # Duração da manobra de fuga em segundos
 
 # Nomes dos Estados da Máquina de Estados
-STATE_ATTACKING_BALL = "attacking_ball"
+STATE_PUSHING_BALL = "pushing_ball"
+STATE_POSITIONING = "positioning_for_kick"
 STATE_AVOIDING_WALL = "avoiding_wall"
-STATE_UNSTICKING = "unsticking" # --- NOVO ESTADO ---
+STATE_UNSTICKING = "unsticking" 
 
 
 # FUNÇÃO DE CONEXÃO (pode ser mantida fora da classe)
@@ -49,12 +56,13 @@ def connect_CRB(port):
 
 #CLASSE PRINCIPAL DO ROBÔ
 class Corobeu:
-    def __init__(self, kp, ki, kd, dt):
+    def __init__(self, kp, ki, kd, dt, pid_max):
         
         self.kp = kp
         self.ki = ki
         self.kd = kd
         self.dt = dt
+        self.pid_max = pid_max
         
         # --- Filtro para o Termo Derivativo ---
         self.filter_alpha = 0.5 
@@ -68,10 +76,14 @@ class Corobeu:
         # --- Parâmetros Físicos e de Movimento do Robô ---
         self.v_max = 8
         self.v_min = -8
-        self.v_linear = 4
+        self.v_linear = 7
+        
+        # --- NOVO: Parâmetros específicos para o PUSH/CHUTE ---
+        self.v_push = 7  # Uma velocidade de push dedicada (um pouco menor que a de approach)
+        self.kp_push = 2.5 # Um ganho P "suave" apenas para o push, para evitar oscilação
         
         # --- Variáveis da Máquina de Estados ---
-        self.current_state = STATE_ATTACKING_BALL
+        self.current_state = STATE_POSITIONING
         self.robot_position = {'x': 0.0, 'y': 0.0, 'phi': 0.0}
         self.ball_position = {'x': 0.0, 'y': 0.0}
         
@@ -88,7 +100,7 @@ class Corobeu:
         signal.signal(signal.SIGINT, self.off)
         signal.signal(signal.SIGTERM, self.off)
 
-    def speed_control(self, U, omega):
+    def speed_control(self, U, omega) -> tuple:
         """
         Calcula a velocidade de cada roda e escala para não passar do limite máximo,
         mantendo a proporção de giro.
@@ -112,7 +124,7 @@ class Corobeu:
         
         return int(vl), int(vr)
 
-    def pid_controller(self, error, integral_counter):
+    def pid_controller(self, error, integral_counter) -> float:
         """
         Controlador PID robusto com filtro na derivada e anti-windup na integral.
         """
@@ -132,11 +144,53 @@ class Corobeu:
             Integral_saturation,
         )
         self.f_ant = f
-        PID = kp * error + self.Integral_part + deerror * kd
-        return PID
+        pid = kp * error + self.Integral_part + deerror * kd
+        # if (self.current_state == STATE_PUSHING_BALL):
+        pid_saturado = max(min(pid, self.pid_max), -self.pid_max)
+        print(f"P: {kp*error}, I: {self.Integral_part}, D: {deerror * kd}, PID: {pid_saturado}")
+        return pid_saturado
     
-    # --- MÉTODOS EXISTENTES E NOVOS PARA A ESTRATÉGIA ---
+    def calculate_target_point(self) -> dict:
+        """
+        Calcula o ponto atrás da bola, alinhado com o gol.
+        Retorna um dicionário {'x': target_x, 'y': target_y}
+        """
+        ball_x = self.ball_position['x']
+        ball_y = self.ball_position['y']
+
+        # 1. Calcular o vetor do gol para a bola
+        vec_x = ball_x - GOAL_X
+        vec_y = ball_y - GOAL_Y
+
+        # 2. Calcular a magnitude (distância) desse vetor
+        magnitude = math.sqrt(vec_x**2 + vec_y**2)
+
+        # Evitar divisão por zero se a bola estiver exatamente no gol
+        if magnitude == 0:
+            return {'x': ball_x, 'y': ball_y} 
+
+        # 3. Normalizar o vetor (transformá-lo em um vetor de comprimento 1)
+        norm_x = vec_x / magnitude
+        norm_y = vec_y / magnitude
+
+        # 4. Calcular o ponto-alvo: começa na bola e "anda" para trás na direção do vetor normalizado
+        target_x = ball_x + norm_x * POSITIONING_DISTANCE
+        target_y = ball_y + norm_y * POSITIONING_DISTANCE
+
+        # --- NOVO (Dia 6 - Edge Case): Garantir que o ponto-alvo não esteja fora do campo
+        target_x = max(min(target_x, FIELD_X_MAX - WALL_MARGIN), FIELD_X_MIN + WALL_MARGIN)
+        target_y = max(min(target_y, FIELD_Y_MAX - WALL_MARGIN), FIELD_Y_MIN + WALL_MARGIN)
+
+        return {'x': target_x, 'y': target_y}
     
+
+    def reset_pid(self):
+        """Reseta os termos de estado do controlador PID."""
+        self.interror = [0 for _ in range(self.integral_range)]
+        self.Integral_part = 0
+        self.f_ant = 0
+
+
     def is_near_wall(self):
         """Verifica se o robô está na margem de perigo perto de uma parede."""
         x = self.robot_position['x']
@@ -149,7 +203,7 @@ class Corobeu:
             return True
         return False
 
-    # --- NOVO: Método para detectar se o robô está preso ---
+
     def is_stuck(self):
         """Verifica se o robô está preso comparando comando de motor com movimento real."""
         # Calcula a distância percorrida desde a última verificação
@@ -184,7 +238,7 @@ class Corobeu:
         error_phi = self.wrap_angle(target_angle_to_center - robot_phi)
         
         # 3. Usa um controlador Proporcional simples para girar rápido
-        kp_avoid = 5.0 
+        kp_avoid = 3.0 
         omega = kp_avoid * error_phi
         
         # 4. Define uma velocidade linear para trás para se afastar
@@ -192,10 +246,9 @@ class Corobeu:
         
         # Se o robô já está virado para o centro, ele para de dar ré e apenas gira
         if abs(error_phi) < math.radians(45): # 45 graus
-            U = 0
-
-        print(f"--- EVITANDO PAREDE --- Ângulo alvo: {math.degrees(target_angle_to_center):.1f} deg, Erro: {math.degrees(error_phi):.1f} deg")
-        
+            U = self.v_linear
+            
+        print(f"--- WALL AVOIDANCE ---")
         return self.speed_control(U, omega)
 
     # --- NOVO: Método para executar a manobra de fuga ---
@@ -214,7 +267,7 @@ class Corobeu:
         error_phi = self.wrap_angle(target_angle_to_center - self.robot_position['phi'])
         
         # Controlador P para o giro
-        kp_unstick = 6.0
+        kp_unstick = 3.0
         omega = kp_unstick * error_phi
         
         # Velocidade de ré constante
@@ -249,6 +302,8 @@ class Corobeu:
         
         # Loop principal de estratégia
         while True:
+            previous_state = self.current_state
+            
             current_time = time.time()
             if (current_time - self.last_update_time) < self.dt:
                 continue # Garante que o loop rode na frequência definida por dt
@@ -272,39 +327,99 @@ class Corobeu:
                 self.ball_position['x'] = ballPos[0]
                 self.ball_position['y'] = ballPos[1]
 
-            # 2. VERIFICAR TRANSIÇÕES DE ESTADO (--- LÓGICA ALTERADA ---)
-            # A ordem de verificação é importante: a condição de "preso" tem a maior prioridade.
-            
-            # Se está no estado de fuga, verifica se o tempo acabou
+            # Prioridade 1: Sair de "preso"
             if self.current_state == STATE_UNSTICKING:
                 if time.time() - self.unstick_start_time > UNSTICK_DURATION:
-                    self.current_state = STATE_ATTACKING_BALL # Volta ao normal
-            
-            # Verifica se o robô ficou preso
+                    self.current_state = STATE_POSITIONING # Volta a se posicionar
+
+            # Prioridade 2: Detectar "preso"
             if self.is_stuck() and self.current_state != STATE_UNSTICKING:
                 self.current_state = STATE_UNSTICKING
-                self.unstick_start_time = time.time() # Inicia o temporizador da manobra
-            
-            # Se não está preso, segue a lógica normal
+                self.unstick_start_time = time.time()
+
+            # Prioridade 3: Evitar paredes (a menos que esteja "preso")
             elif self.current_state != STATE_UNSTICKING:
                 if self.is_near_wall():
                     self.current_state = STATE_AVOIDING_WALL
+
+                # --- LÓGICA DE ATAQUE (Prioridade 4) ---
                 else:
-                    self.current_state = STATE_ATTACKING_BALL
+                    # Distância do robô até a BOLA (não o ponto-alvo)
+                    dist_to_ball = math.sqrt((self.ball_position['x'] - self.robot_position['x'])**2 + 
+                                             (self.ball_position['y'] - self.robot_position['y'])**2)
+
+                    # Ângulo que o robô *deveria* ter (mirando no gol)
+                    angle_to_goal = math.atan2(GOAL_Y - self.robot_position['y'], 
+                                               GOAL_X - self.robot_position['x'])
+                    error_to_goal_angle = self.wrap_angle(angle_to_goal - self.robot_position['phi'])
+
+
+                    # --- LÓGICA DE TRANSIÇÃO ATUALIZADA ---
+
+                    if self.current_state == STATE_PUSHING_BALL:
+                        # CONDIÇÃO DE SAÍDA: Quando parar de chutar?
+                        # 1. Se perdemos a bola (ela foi para longe)
+                        # 2. Se erramos o alvo (viramos mais de ~45 graus do gol)
+                        if (dist_to_ball > LOST_BALL_DISTANCE or 
+                            abs(error_to_goal_angle) > math.radians(45)):
+
+                            self.current_state = STATE_POSITIONING # Volta a se posicionar
+                            self.reset_pid
+
+                    elif self.current_state == STATE_POSITIONING:
+                        # CONDIÇÃO DE ENTRADA: Quando começar a chutar?
+
+                        # Distância do robô até o ponto-alvo atrás da bola
+                        target_point = self.calculate_target_point()
+                        dist_to_target = math.sqrt((target_point['x'] - self.robot_position['x'])**2 + 
+                                                   (target_point['y'] - self.robot_position['y'])**2)
+                        is_aligned_for_kick = (dist_to_target < KICK_ALIGNMENT_DISTANCE and 
+                                               abs(error_to_goal_angle) < KICK_ALIGNMENT_ANGLE)
+
+                        if is_aligned_for_kick:
+                            self.current_state = STATE_PUSHING_BALL
+                            self.reset_pid
+
+                    else:
+                         # Se saímos da parede/preso, voltamos a nos posicionar
+                        self.current_state = STATE_POSITIONING
+                        self.reset_pid
+
 
             # 3. EXECUTAR A LÓGICA DO ESTADO ATUAL
-            if self.current_state == STATE_ATTACKING_BALL:
-                print(f"ESTADO: [ATACANDO BOLA]")
-                phid = math.atan2(self.ball_position['y'] - self.robot_position['y'], 
-                                  self.ball_position['x'] - self.robot_position['x'])
+
+            if self.current_state == STATE_POSITIONING:
+                print(f"ESTADO: [POSICIONANDO]")
+                target_point = self.calculate_target_point() 
+                phid = math.atan2(target_point['y'] - self.robot_position['y'], 
+                                  target_point['x'] - self.robot_position['x'])
                 error_phi = self.wrap_angle(phid - self.robot_position['phi'])
+
+                # Usa o PID completo e a velocidade linear normal
                 omega = self.pid_controller(error_phi, integral_counter)
                 vl, vr = self.speed_control(self.v_linear, omega)
-                
                 integral_counter += 1
                 if integral_counter >= self.integral_range:
                     integral_counter = 0
-                
+
+            # --- ESTADO DE CHUTE ATUALIZADO ---
+            elif self.current_state == STATE_PUSHING_BALL:
+                print(f"ESTADO: [CHUTANDO PARA O GOL]")
+
+                # Mira no CENTRO DO GOL
+                phid = math.atan2(GOAL_Y - self.robot_position['y'], 
+                                  GOAL_X - self.robot_position['x'])
+                error_phi = self.wrap_angle(phid - self.robot_position['phi'])
+
+                # --- USA O CONTROLADOR P SIMPLES ---
+                # Usa o kp_push "suave" que definimos no __init__
+                omega = self.kp_push * error_phi
+
+                # Usa a velocidade de push dedicada
+                vl, vr = self.speed_control(self.v_push, omega)
+
+                # 3. EXECUTAR A LÓGICA DO ESTADO ATUAL  
+
             elif self.current_state == STATE_AVOIDING_WALL:
                 print(f"ESTADO: [EVITANDO PAREDE]")
                 vl, vr = self.perform_wall_avoidance()
@@ -320,17 +435,29 @@ class Corobeu:
             # 4. ENVIAR COMANDOS AOS MOTORES
             sim.simxSetJointTargetVelocity(clientID, motorE, vl, sim.simx_opmode_blocking)
             sim.simxSetJointTargetVelocity(clientID, motorD, vr, sim.simx_opmode_blocking)
+            
+            if self.current_state != previous_state:
+                self.reset_pid()
 
 # PONTO DE ENTRADA DO PROGRAMA
 if __name__ == "__main__":
     
     # --- Parâmetros de Controle (Tuning do PID) ---
-    kp = 3.45051784 
-    ki = 0.02365731 # PSO
-    kd = 0.06288346
+    # kp = 3.45051784 
+    # ki = 0.02365731 # PSO
+    # kd = 0.06288346
+    
+    kp = 3.09355224
+    ki = 0.02755811
+    kd = 0.0328926
+    
+    # kp = 3.45051784 
+    # ki = 0.02365731 # EMPIRICO
+    # kd = 0.06288346
+    pid_max = 2
     
     dt = 0.05  # Tempo de ciclo do controlador (50 ms)
     
     # --- Inicialização e Execução ---
-    crb01 = Corobeu(kp, ki, kd, dt)
+    crb01 = Corobeu(kp, ki, kd, dt, pid_max)
     crb01.run_strategy()

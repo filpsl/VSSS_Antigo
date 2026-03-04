@@ -2,8 +2,6 @@ import time
 import math
 import sims.sim as sim
 import numpy as np
-import signal
-import sys
 
 def connect_CRB(port):
         """""
@@ -92,18 +90,18 @@ def algoritmo_pso(S, N, iteracoes_max):
     # PREPARANDO OS PLOTS
     historico = []
     
-    # ARPSO
+    # # ARPSO
     fase_repulsiva = False
-    iteracoes_repulsivas = 5
+    # iteracoes_repulsivas = 5
     
     # COMEÇANDO O ALGORITMO
     iteracao = 0                           
     while iteracao < iteracoes_max:
         
-        ## ARPSO ## 1. Define o gatilho para a fase de repulsão
-        # A cada 20 iterações (exceto a primeira), ativa a fase de repulsão.
-        if (iteracao % 40 == 0) and (iteracao > 0):
-            fase_repulsiva = True
+        # ## ARPSO ## 1. Define o gatilho para a fase de repulsão
+        # # A cada 20 iterações (exceto a primeira), ativa a fase de repulsão.
+        # if (iteracao % 40 == 0) and (iteracao > 0):
+        #     fase_repulsiva = True
         
         if fase_repulsiva:
             print(f"--- Iteração {iteracao}: FASE DE REPULSÃO ATIVADA ---")
@@ -240,6 +238,7 @@ class Corobeu:
 
     def cacar_pid(self, PID):
         
+        self.interror = [0 for _ in range(self.integral_range)]
         integral_counter = 0
         kp, ki, kd = PID[0], PID[1], PID[2]
         path = [[0.4, 0.4],
@@ -352,4 +351,4 @@ class Corobeu:
 
 if __name__ == "__main__":
 
-    algoritmo_pso(3, 3, 1000)
+    algoritmo_pso(5, 3, 1000)

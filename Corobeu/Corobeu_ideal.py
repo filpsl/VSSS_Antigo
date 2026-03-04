@@ -19,6 +19,7 @@ def init_vision_socket(VISION_IP="224.5.23.2", VISION_PORT=10015):
         struct.pack("=4sl", socket.inet_aton(VISION_IP), socket.INADDR_ANY),
     )
     sock.bind((VISION_IP, VISION_PORT))
+    sock.setblocking(False)
     return sock
 
 
@@ -59,9 +60,37 @@ class Corobeu:
         signal.signal(signal.SIGTERM, self.off)
 
     def get_position(self):
-        data, _ = self.vision_sock.recvfrom(1024)
+        data = None # Armazena o último pacote lido
+        
+        while True:
+            try:
+                # Tenta ler o próximo pacote do buffer
+                packet_data, _ = self.vision_sock.recvfrom(1024)
+                data = packet_data # Se conseguiu, guarda esse (que é o "mais novo" até agora)
+            
+            except (BlockingIOError, socket.error):
+                # EXCEÇÃO!
+                # Isso é BOM. Significa que o buffer está VAZIO.
+                # O último pacote que guardamos em 'data' é o mais recente.
+                break # Sai do loop 'while True'
+            
+            except Exception as e:
+                # Algum outro erro sério
+                print(f"Erro inesperado no socket de visão: {e}")
+                return None, None, None, None, None
+
+        # Se saímos do loop, ou o buffer estava vazio (data=None) 
+        # ou temos o pacote mais recente (data=packet_data)
+
+        if data is None:
+            # O buffer estava vazio, não recebemos nada desta vez.
+            return None, None, None, None, None
+
+        # Se chegamos aqui, 'data' contém o pacote mais FRESCO.
+        # Agora sim, fazemos o parse:
         frame = wr.SSL_WrapperPacket().FromString(data)
         robots = getattr(frame.detection, self._robot_attr)
+        
         for robot in robots:
             if robot.robot_id == self.robot_id:
                 return (
@@ -71,6 +100,7 @@ class Corobeu:
                     frame.detection.balls[0].x / 1000,
                     frame.detection.balls[0].y / 1000,
                 )
+        
         return None, None, None, None, None
 
     def speed_control(self, U, omega):
@@ -86,8 +116,8 @@ class Corobeu:
 
         if math.isnan(vr) or math.isnan(vl):
             vr, vl = 0, 0
-
-        return int(vl), int(vr)
+        # print(vl, vr)
+        return int(-vl), int(-vr)
 
     def send_speed(self, speed_left, speed_right):
         direction_left = 1 if speed_left >= 0 else 0
@@ -123,6 +153,9 @@ class Corobeu:
                 phi_obs = self.wrap_angle(phi_obs)
 
                 error_phi = self.wrap_angle(phid - phi_obs)
+                # if -0.3 < error_phi < 0.3:
+                #     print("Alinhado com a bola!")
+                # print(error_phi)
                 omega = self.pid_controller(error_phi, integral_counter)
 
                 error_distance = math.sqrt((ball_y - y) ** 2 + (ball_x - x) ** 2)
@@ -131,8 +164,9 @@ class Corobeu:
                 U = self.v_linear
 
                 vl, vr = self.speed_control(U, omega)
-                print(f"VL: {vl} VR: {vr} + 60")
-                # self.send_speed(vl, vr + 60)
+                # print(f"VL: {vl} VR: {vr}")
+                self.send_speed(vl, vr)
+                # self.send_speed(0, 0)
 
                 integral_counter += 1
                 if integral_counter >= self.integral_range:
@@ -164,7 +198,7 @@ class Corobeu:
                 current_time = time.time()
 
                 vl, vr = self.speed_control(U, omega)
-                self.send_speed(vl, vr + 60)
+                self.send_speed(vl, vr)
                 self.last_speed_time = current_time
 
                 if error_distance <= 0.07 and stop_on_arrival:
@@ -192,6 +226,7 @@ class Corobeu:
         )
         self.f_ant = f
         PID = kp * error + self.Integral_part + deerror * kd
+        # print(PID)
         return PID
 
     def wrap_angle(self, angle):
@@ -210,15 +245,19 @@ if __name__ == "__main__":
     ROBOT_ID = ID_KRATOS
     ROBOT_PORT = 80
 
-    kp = 3.0528502
-    kd = 0.79546531
-    ki = 0
+    kp = 6.5
+    kd = 0.2
+    ki = 0.2
 
-    dt = 0.2
+    dt = 0.05
 
-    kp = 10
-    ki = 3.63
-    kd = 2.46
+    # kp = 3.46
+    # ki = 0.
+    # kd = 2.46
+    
+    # kp = 3.45051784 
+    # ki = 0.02365731 # PSO
+    # kd = 0.06288346
 
     vision_sock = init_vision_socket(VISION_IP, VISION_PORT)
     crb01 = Corobeu(ROBOT_IP, ROBOT_PORT, ROBOT_ID, vision_sock, kp, ki, kd, dt)
