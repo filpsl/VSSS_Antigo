@@ -20,6 +20,7 @@ Motor::Motor(int pin_R, int pin_L, int channelR, int channelL) {
 
     ledcSetup(channelR, PWM_MOTOR_FREQUENCY, PWM_MOTOR_RESOLUTION);
     ledcSetup(channelL, PWM_MOTOR_FREQUENCY, PWM_MOTOR_RESOLUTION);
+
     ledcAttachPin(pin_R, channelR);
     ledcAttachPin(pin_L, channelL);
 }
@@ -44,8 +45,8 @@ void Motor::moveForward(int speed, int direction) {
 
 void Motor::stop() {
     // This method stop both direction by setting duty cicle equal zero
-    ledcWrite(pin_R, 0x00);
-    ledcWrite(pin_L, 0x00);
+    ledcWrite(channelR, 0x00);
+    ledcWrite(channelL, 0x00);
 }
 
 
